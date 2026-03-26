@@ -103,8 +103,8 @@ chmod +x scripts/build_macos_dmg.sh
 
 打包完成后产物位于：
 
-- `dist/CPA Codex Manager.app`
-- `dist/CPA Codex Manager.dmg`
+- `dist/CPA-Codex-Manager.app`
+- `dist/CPA-Codex-Manager.dmg`
 
 
 ### Windows 桌面版打包
@@ -117,7 +117,7 @@ scripts\build_windows.bat
 
 打包完成后产物通常位于：
 
-- `dist\CPA Codex Manager\CPA Codex Manager.exe`
+- `dist\CPA-Codex-Manager\CPA-Codex-Manager.exe`
 
 
 

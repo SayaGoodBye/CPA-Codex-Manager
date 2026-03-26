@@ -880,15 +880,20 @@ class RegistrationEngine:
             self._log("注册引擎: 流程启动")
             self._log("-" * 40)
 
-            # 1. 检查 IP 地理位置
-            self._log("[阶段 1] 正在校验 IP 归属地...")
-            ip_ok, location = self._check_ip_location()
-            if not ip_ok:
-                result.error_message = f"IP 归属地不受支持: {location}"
-                self._log(f"IP 校验失败: {location}", "error")
-                return result
+            settings = get_settings()
 
-            self._log(f"IP 归属地已确认: {location}")
+            # 1. 检查 IP 地理位置
+            if settings.registration_check_ip_location:
+                self._log("[阶段 1] 正在校验 IP 归属地...")
+                ip_ok, location = self._check_ip_location()
+                if not ip_ok:
+                    result.error_message = f"IP 归属地不受支持: {location}"
+                    self._log(f"IP 校验失败: {location}", "error")
+                    return result
+
+                self._log(f"IP 归属地已确认: {location}")
+            else:
+                self._log("[阶段 1] 已跳过 IP 归属地校验（设置中已关闭）", "warning")
 
             # 2. 创建邮箱
             self._log("[阶段 2] 正在开通邮箱账户...")

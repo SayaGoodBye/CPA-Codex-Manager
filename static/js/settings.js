@@ -262,6 +262,7 @@ async function loadSettings() {
         document.getElementById('password-length').value = data.registration?.default_password_length || 12;
         document.getElementById('sleep-min').value = data.registration?.sleep_min || 5;
         document.getElementById('sleep-max').value = data.registration?.sleep_max || 30;
+        document.getElementById('check-ip-location').checked = data.registration?.check_ip_location !== false;
 
         // 验证码等待配置
         if (data.email_code) {
@@ -399,6 +400,7 @@ async function handleSaveRegistration(e) {
         default_password_length: parseInt(document.getElementById('password-length').value),
         sleep_min: parseInt(document.getElementById('sleep-min').value),
         sleep_max: parseInt(document.getElementById('sleep-max').value),
+        check_ip_location: document.getElementById('check-ip-location').checked,
     };
 
     try {

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-APP_NAME="CPA Codex Manager"
+APP_NAME="CPA-Codex-Manager"
 DIST_DIR="$PROJECT_ROOT/dist"
 APP_PATH="$DIST_DIR/$APP_NAME.app"
 DMG_PATH="$DIST_DIR/$APP_NAME.dmg"
@@ -195,6 +195,8 @@ mkdir -p "$DMG_STAGING/.background"
 cp "$BACKGROUND_PNG" "$DMG_STAGING/.background/background.png"
 customize_dmg_layout
 
+echo "清理中间产物，只保留 DMG"
+rm -rf "$APP_PATH" "$DMG_RW_PATH" "$DMG_STAGING"
+
 echo "构建完成"
-echo "APP: $APP_PATH"
 echo "DMG: $DMG_PATH"

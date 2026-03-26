@@ -49,6 +49,7 @@ class RegistrationSettings(BaseModel):
     default_password_length: int = 12
     sleep_min: int = 5
     sleep_max: int = 30
+    check_ip_location: bool = True
 
 
 class WebUISettings(BaseModel):
@@ -93,6 +94,7 @@ async def get_all_settings():
             "default_password_length": settings.registration_default_password_length,
             "sleep_min": settings.registration_sleep_min,
             "sleep_max": settings.registration_sleep_max,
+            "check_ip_location": settings.registration_check_ip_location,
         },
         "webui": {
             "host": settings.webui_host,
@@ -208,6 +210,7 @@ async def get_registration_settings():
         "default_password_length": settings.registration_default_password_length,
         "sleep_min": settings.registration_sleep_min,
         "sleep_max": settings.registration_sleep_max,
+        "check_ip_location": settings.registration_check_ip_location,
     }
 
 
@@ -220,6 +223,7 @@ async def update_registration_settings(request: RegistrationSettings):
         registration_default_password_length=request.default_password_length,
         registration_sleep_min=request.sleep_min,
         registration_sleep_max=request.sleep_max,
+        registration_check_ip_location=request.check_ip_location,
     )
 
     return {"success": True, "message": "注册设置已更新"}
