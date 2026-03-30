@@ -18,6 +18,104 @@ from ...config.settings import get_settings
 logger = logging.getLogger(__name__)
 
 
+def _b64url_json(data: dict) -> str:
+    import base64
+    raw = json.dumps(data, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _b64url_bytes(data: bytes) -> str:
+    import base64
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+
+
+def _decode_jwt_payload(token: str) -> dict:
+    import base64
+    parts = str(token or "").split(".")
+    if len(parts) < 2:
+        return {}
+    try:
+        padded = parts[1] + "=" * (-len(parts[1]) % 4)
+        return json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+    except Exception:
+        return {}
+
+
+def _get_auth_info(payload: dict) -> dict:
+    auth = payload.get("https://auth.openai.com") or {}
+    return auth if isinstance(auth, dict) else {}
+
+
+def _derive_display_name(email: str) -> str:
+    if not email:
+        return "Codex User"
+    local = email.split("@", 1)[0].replace(".", " ").replace("_", " ").replace("-", " ").strip()
+    return local[:64] or "Codex User"
+
+
+def _build_compat_id_token(access_token: str, email: str) -> str:
+    import hashlib
+    payload = _decode_jwt_payload(access_token)
+    auth_info = _get_auth_info(payload)
+    auth_time = payload.get("iat") or payload.get("auth_time") or 0
+    user_id = str(auth_info.get("user_id") or payload.get("sub") or hashlib.sha256((email or access_token).encode('utf-8')).hexdigest()[:32])
+    session_id = str(auth_info.get("session_id") or hashlib.sha256((access_token or email).encode('utf-8')).hexdigest()[:32])
+    compat_payload = {
+        "iss": "https://auth.openai.com",
+        "aud": "openai-compat",
+        "email": email or payload.get("email") or "",
+        "email_verified": True,
+        "iat": auth_time,
+        "exp": payload.get("exp") or (auth_time + 3600 if auth_time else 0),
+        "user_id": user_id,
+        "name": _derive_display_name(email),
+        "rat": auth_time,
+        "sid": session_id,
+        "sub": payload.get("sub") or user_id,
+    }
+    header = {"alg": "RS256", "typ": "JWT", "kid": "compat"}
+    signature = _b64url_bytes(b"compat_signature_for_cpa_parsing_only")
+    return f"{_b64url_json(header)}.{_b64url_json(compat_payload)}.{signature}"
+
+
+def _resolve_chatgpt_account_id(account: Account) -> str:
+    direct_value = str(account.account_id or "").strip() or str(account.workspace_id or "").strip()
+    if direct_value:
+        return direct_value
+
+    extra = account.extra_data or {}
+    candidates = [
+        extra.get("account_id"),
+        extra.get("workspace_id"),
+        extra.get("user_id"),
+        (extra.get("account") or {}).get("id"),
+        (extra.get("account") or {}).get("account_id"),
+        (extra.get("user") or {}).get("id"),
+        ((extra.get("raw_session") or {}).get("account") or {}).get("id"),
+        ((extra.get("raw_session") or {}).get("user") or {}).get("id"),
+    ]
+    for item in candidates:
+        value = str(item or "").strip()
+        if value:
+            return value
+
+    access_payload = _decode_jwt_payload(account.access_token or "")
+    auth_info = _get_auth_info(access_payload)
+    access_candidates = [
+        auth_info.get("chatgpt_account_id"),
+        auth_info.get("account_id"),
+        auth_info.get("user_id"),
+        access_payload.get("chatgpt_account_id"),
+        access_payload.get("account_id"),
+        access_payload.get("sub"),
+    ]
+    for item in access_candidates:
+        value = str(item or "").strip()
+        if value:
+            return value
+    return ""
+
+
 def _normalize_cpa_auth_files_url(api_url: str) -> str:
     """将用户填写的 CPA 地址规范化为 auth-files 接口地址。"""
     normalized = (api_url or "").strip().rstrip("/")
@@ -334,5 +432,8 @@ def test_cpa_connection(api_url: str, api_token: str, proxy: str = None) -> Tupl
         return False, f"无法连接到服务器: {str(e)}"
     except cffi_requests.exceptions.Timeout:
         return False, "连接超时，请检查网络配置"
-    except Exception as e:
-        return False, f"连接测试失败: {str(e)}"
+    except Exception as e:
+
+        return False, f"连接测试失败: {str(e)}"
+
+ 28f1c18 (修复Codex 凭证缺少 ChatGPT 账号 ID问题)

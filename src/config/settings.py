@@ -516,23 +516,65 @@ def _load_settings_from_db() -> Dict[str, Any]:
             env_url = os.environ.get("APP_DATABASE_URL") or os.environ.get("DATABASE_URL")
             if env_url:
                 settings_dict["database_url"] = _normalize_database_url(env_url)
-            env_host = os.environ.get("APP_HOST")
+            env_host = os.environ.get("WEBUI_HOST") or os.environ.get("APP_HOST")
             if env_host:
                 settings_dict["webui_host"] = env_host
-            env_port = os.environ.get("APP_PORT")
+            env_port = os.environ.get("WEBUI_PORT") or os.environ.get("APP_PORT")
             if env_port:
                 try:
                     settings_dict["webui_port"] = int(env_port)
                 except ValueError:
                     pass
-            env_password = os.environ.get("APP_ACCESS_PASSWORD")
+            env_password = os.environ.get("WEBUI_ACCESS_PASSWORD") or os.environ.get("APP_ACCESS_PASSWORD")
             if env_password:
                 settings_dict["webui_access_password"] = env_password
         return settings_dict
     except Exception as e:
         if "未初始化" not in str(e):
             print(f"[Settings] 从数据库加载设置失败: {e}，使用默认值")
-        return {name: defn.default_value for name, defn in SETTING_DEFINITIONS.items()}
+        settings_dict = {name: defn.default_value for name, defn in SETTING_DEFINITIONS.items()}
+        env_url = os.environ.get("APP_DATABASE_URL") or os.environ.get("DATABASE_URL")
+        if env_url:
+            settings_dict["database_url"] = _normalize_database_url(env_url)
+        env_host = os.environ.get("WEBUI_HOST") or os.environ.get("APP_HOST")
+        if env_host:
+            settings_dict["webui_host"] = env_host
+        env_port = os.environ.get("WEBUI_PORT") or os.environ.get("APP_PORT")
+        if env_port:
+            try:
+                settings_dict["webui_port"] = int(env_port)
+            except ValueError:
+                pass
+        env_password = os.environ.get("WEBUI_ACCESS_PASSWORD") or os.environ.get("APP_ACCESS_PASSWORD")
+        if env_password:
+            settings_dict["webui_access_password"] = env_password
+        return settings_dict
+
+
+def _apply_runtime_env_overrides(settings_dict: Dict[str, Any]) -> Dict[str, Any]:
+    """确保运行时环境变量对关键启动配置保持最高优先级。"""
+    updated = dict(settings_dict)
+
+    env_url = os.environ.get("APP_DATABASE_URL") or os.environ.get("DATABASE_URL")
+    if env_url:
+        updated["database_url"] = _normalize_database_url(env_url)
+
+    env_host = os.environ.get("WEBUI_HOST") or os.environ.get("APP_HOST")
+    if env_host:
+        updated["webui_host"] = env_host
+
+    env_port = os.environ.get("WEBUI_PORT") or os.environ.get("APP_PORT")
+    if env_port:
+        try:
+            updated["webui_port"] = int(env_port)
+        except ValueError:
+            pass
+
+    env_password = os.environ.get("WEBUI_ACCESS_PASSWORD") or os.environ.get("APP_ACCESS_PASSWORD")
+    if env_password:
+        updated["webui_access_password"] = env_password
+
+    return updated
 
 
 def _save_settings_to_db(**kwargs) -> None:
@@ -688,7 +730,7 @@ def get_settings() -> Settings:
         # 先初始化默认设置（如果数据库中没有的话）
         init_default_settings()
         # 从数据库加载所有设置
-        settings_dict = _load_settings_from_db()
+        settings_dict = _apply_runtime_env_overrides(_load_settings_from_db())
         _settings = Settings(**settings_dict)
     return _settings
 
@@ -704,6 +746,7 @@ def update_settings(**kwargs) -> Settings:
     # 创建新的配置实例
     updated_data = _settings.model_dump()
     updated_data.update(kwargs)
+    updated_data = _apply_runtime_env_overrides(updated_data)
     _settings = Settings(**updated_data)
 
     # 保存到数据库
