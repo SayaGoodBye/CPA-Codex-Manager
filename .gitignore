@@ -65,6 +65,9 @@ token_*.json
 Thumbs.db
 Icon?
 
-# Project specific
-backups/
-/out/
+# Project specific
+backups/
+/out/
+.alma-snapshots
+src/web/routes/cliproxy_safe_scan.py
+.alma_patch_safe_scan.py

@@ -13,12 +13,23 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 from pathlib import Path
 import aiohttp
+
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Body
+
 from pydantic import BaseModel
 
+
+
+from ...config.settings import get_settings
+
+from ...core.dynamic_proxy import get_proxy_url_for_task
+
 from ...database import crud
+
 from ...database.session import get_db
+
 from ..task_manager import task_manager
+
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -26,16 +37,29 @@ router = APIRouter()
 # ---------------- Pydantic Models ----------------
 
 class ScanRequest(BaseModel):
+
     service_id: int
+
     mode: str = "all"  # "401", "quota", "all"
+
     names: Optional[List[str]] = None  # 如果提供，则只检测勾选的账号
+
     target_type: str = "codex"
+
     workers: int = 30
+
     timeout: int = 15
+
     retries: int = 1
+
     weekly_threshold: float = 95.0
+
     primary_threshold: float = 95.0
+
     allow_disabled: bool = False
+
+    proxy: Optional[str] = None
+
 
 class AutoPatrolConfig(BaseModel):
     service_id: int
@@ -67,11 +91,19 @@ class AutoPatrolConfig(BaseModel):
     startup_jitter_seconds: int = 8
 
 class ActionRequest(BaseModel):
+
     service_id: int
+
     action: str  # "close" or "delete" or "enable"
+
     names: List[str]
+
     workers: int = 20
+
     timeout: int = 30
+
+    proxy: Optional[str] = None
+
 
 # ---------------- Helper Functions ----------------
 
@@ -92,6 +124,20 @@ def _extract_chatgpt_account_id(item: dict) -> Optional[str]:
         val = item.get(key)
         if val: return val
     return None
+
+
+def _get_outbound_proxy(request_proxy: Optional[str] = None) -> Optional[str]:
+    """获取 CPA 检测/动作对外访问使用的代理。"""
+    if request_proxy:
+        return request_proxy
+    with get_db() as db:
+        proxy = crud.get_random_proxy(db)
+        if proxy:
+            return proxy.proxy_url
+    proxy_url = get_proxy_url_for_task()
+    if proxy_url:
+        return proxy_url
+    return get_settings().proxy_url
 
 def _contains_limit_error(text: str) -> bool:
     keywords = ["usage_limit_reached", "insufficient_quota", "quota_exceeded", "limit_reached", "rate limit"]
@@ -174,6 +220,9 @@ async def perform_scan(batch_id: str, req: ScanRequest):
 
     base_mgmt_url = _normalize_mgmt_url(service.api_url)
     api_token = service.api_token
+    proxy_url = _get_outbound_proxy(req.proxy)
+    if proxy_url:
+        task_manager.add_batch_log(batch_id, f"[阶段] CPA 检测已接入代理: {proxy_url[:60]}...")
 
     task_manager.add_batch_log(batch_id, f"[阶段] 正在从 {service.name} 拉取账号列表...")
 
@@ -182,7 +231,7 @@ async def perform_scan(batch_id: str, req: ScanRequest):
 
     async def _fetch_all_files(session: aiohttp.ClientSession):
         url = f"{base_mgmt_url}/auth-files"
-        async with session.get(url, headers=_get_mgmt_headers(api_token)) as resp:
+        async with session.get(url, headers=_get_mgmt_headers(api_token), proxy=proxy_url) as resp:
             if resp.status != 200:
                 error_text = await resp.text()
                 raise RuntimeError(f"获取列表失败 (HTTP {resp.status}): {error_text[:200]}")
@@ -201,7 +250,7 @@ async def perform_scan(batch_id: str, req: ScanRequest):
             url = f"{base_mgmt_url}/auth-files?name={encoded_name}"
             async with sem:
                 try:
-                    async with session.get(url, headers=_get_mgmt_headers(api_token)) as resp:
+                    async with session.get(url, headers=_get_mgmt_headers(api_token), proxy=proxy_url) as resp:
                         if resp.status != 200:
                             fallback = True
                             error_text = await resp.text()
@@ -243,7 +292,9 @@ async def perform_scan(batch_id: str, req: ScanRequest):
         return deduped
     
     try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=req.timeout)) as session:
+        timeout = aiohttp.ClientTimeout(total=req.timeout, connect=min(req.timeout, 10), sock_connect=min(req.timeout, 10), sock_read=req.timeout)
+        connector = aiohttp.TCPConnector(limit=max(req.workers, 10), ssl=False)
+        async with aiohttp.ClientSession(timeout=timeout, connector=connector, trust_env=True) as session:
             if req.names:
                 all_files = await _fetch_selected_files(session, req.names)
             if all_files is None or not req.names:
@@ -319,9 +370,9 @@ async def perform_scan(batch_id: str, req: ScanRequest):
         auth_index = item.get("auth_index")
         name = item.get("name")
         email = item.get("email") or item.get("account") or "unknown"
-        
+
         res = {"name": name, "email": email, "status": "ok", "quota": None, "error": None}
-        
+
         payload = {
             "authIndex": auth_index,
             "method": "GET",
@@ -333,22 +384,17 @@ async def perform_scan(batch_id: str, req: ScanRequest):
             }
         }
         acc_id = _extract_chatgpt_account_id(item)
-        if acc_id: payload["header"]["Chatgpt-Account-Id"] = acc_id
+        if acc_id:
+            payload["header"]["Chatgpt-Account-Id"] = acc_id
 
         try:
             async with sem:
-                # 只有在 mode 是 all 或 401 时才检测 401
-                check_401 = req.mode in ("all", "401")
-                # 只有在 mode 是 all 或 quota 时才记录状态为 ok
-                check_quota = req.mode in ("all", "quota")
-
-                # 如果只测 401，我们通过 wham/usage 的状态码逻辑其实是一样的。
-                # 但如果只想节省资源，可以只看 status_code。
                 async with client_session.post(
                     f"{base_mgmt_url}/api-call",
                     headers=_get_mgmt_headers(api_token),
                     json=payload,
-                    timeout=req.timeout
+                    timeout=req.timeout,
+                    proxy=proxy_url
                 ) as resp:
                     if resp.status != 200:
                         res["status"] = "error"
@@ -362,22 +408,25 @@ async def perform_scan(batch_id: str, req: ScanRequest):
                             invalid_401 += 1
                         elif sc == 200:
                             if req.mode == "401":
-                                res["status"] = "ok" # 401 mode under 200 is ok
+                                res["status"] = "ok"
                             else:
-                                # 解析额度
                                 body = data.get("body")
-                                if isinstance(body, str): body = json.loads(body)
-                                
+                                if isinstance(body, str):
+                                    body = json.loads(body)
+
                                 rate_limit = (body or {}).get("rate_limit", {})
                                 usage = 0.0
                                 limit_reached = False
-                                
+
                                 for win in rate_limit.values():
-                                    if not isinstance(win, dict): continue
+                                    if not isinstance(win, dict):
+                                        continue
                                     p = win.get("used_percent")
-                                    if p is not None: usage = max(usage, float(p))
-                                    if win.get("limit_reached"): limit_reached = True
-                                
+                                    if p is not None:
+                                        usage = max(usage, float(p))
+                                    if win.get("limit_reached"):
+                                        limit_reached = True
+
                                 res["quota"] = usage
                                 if limit_reached or usage >= req.weekly_threshold or usage >= req.primary_threshold:
                                     res["status"] = "exhausted"
@@ -390,7 +439,7 @@ async def perform_scan(batch_id: str, req: ScanRequest):
             res["status"] = "error"
             res["error"] = str(e)
             errors += 1
-            
+
         async with progress_lock:
             completed += 1
             ready = completed - invalid_401 - invalid_quota - errors
@@ -408,10 +457,9 @@ async def perform_scan(batch_id: str, req: ScanRequest):
         return res
 
     sem = asyncio.Semaphore(req.workers)
-    connector = aiohttp.TCPConnector(limit=req.workers)
-    async with aiohttp.ClientSession(connector=connector) as session:
+    connector = aiohttp.TCPConnector(limit=req.workers, ssl=False)
+    async with aiohttp.ClientSession(connector=connector, trust_env=True) as session:
         results = await _run_bounded(candidates, req.workers, lambda item: check_one(session, sem, item))
-
     # 3. 保存最后扫描结果到 batch 状态中，供前端展示
     ready_total = max(0, total - invalid_401 - invalid_quota - errors)
     task_manager.update_batch_status(
@@ -434,6 +482,7 @@ async def perform_scan(batch_id: str, req: ScanRequest):
     task_manager.add_batch_log(batch_id, f"[耗时] 全部扫描总耗时 {total_cost:.2f}s")
     task_manager.add_batch_log(batch_id, f"[完成] 扫描结束。有效: {total - invalid_401 - invalid_quota - errors}, 401: {invalid_401}, 额度耗尽: {invalid_quota}, 异常: {errors}")
 
+
 async def perform_action(batch_id: str, req: ActionRequest):
     """执行批量关闭或删除动作"""
     action_cn = {"close": "关闭", "delete": "删除", "enable": "开启"}.get(req.action, req.action)
@@ -448,6 +497,7 @@ async def perform_action(batch_id: str, req: ActionRequest):
 
     base_mgmt_url = _normalize_mgmt_url(service.api_url)
     api_token = service.api_token
+    proxy_url = _get_outbound_proxy(req.proxy)
     total = len(req.names)
     task_manager.update_batch_status(batch_id, total=total)
     
@@ -462,14 +512,14 @@ async def perform_action(batch_id: str, req: ActionRequest):
                 if req.action == "delete":
                     encoded_name = urllib.parse.quote(name, safe="")
                     url = f"{base_mgmt_url}/auth-files?name={encoded_name}"
-                    async with client_session.delete(url, headers=_get_mgmt_headers(api_token)) as resp:
+                    async with client_session.delete(url, headers=_get_mgmt_headers(api_token), proxy=proxy_url) as resp:
                         is_ok = resp.status == 200 or resp.status == 204
                 else:
                     # close or enable
                     url = f"{base_mgmt_url}/auth-files/status"
                     disabled = (req.action == "close")
                     payload = {"name": name, "disabled": disabled}
-                    async with client_session.patch(url, headers=_get_mgmt_headers(api_token), json=payload) as resp:
+                    async with client_session.patch(url, headers=_get_mgmt_headers(api_token), json=payload, proxy=proxy_url) as resp:
                         is_ok = resp.status == 200
                         
                 if is_ok:
@@ -486,7 +536,7 @@ async def perform_action(batch_id: str, req: ActionRequest):
              task_manager.add_batch_log(batch_id, f"[进度] 动作 {action_cn} 已完成 {completed}/{total} (成功: {success}, 失败: {failed})")
 
     sem = asyncio.Semaphore(req.workers)
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(trust_env=True) as session:
         await _run_bounded(req.names, req.workers, lambda name: act_one(session, sem, name))
 
     task_manager.update_batch_status(batch_id, finished=True, status="completed")
@@ -791,18 +841,14 @@ class AutoPatrolManager:
                             names=names_quota
                         ))
 
-                    # 执行 Error 动作 (新要求：异常账号也清理)
-                    if names_errors:
-                        action_batch_id = _new_batch_id("auto_action_error")
-                        task_manager.init_batch(action_batch_id, total=len(names_errors))
-                        task_manager.update_batch_status(action_batch_id, mode="cliproxy_action", monitor_visible=False)
-                        await perform_action(action_batch_id, ActionRequest(
-                            service_id=service_id,
-                            action="delete",
-                            names=names_errors
-                        ))
+                    # 注意：检测异常(error) 只记录，不自动删除。
+
+                    # 否则网络波动、代理超时、CPA 管理端偶发异常时，会把正常认证文件误删。
+
                     
+
                     # 检查是否需要自动补货
+
                     replenish_log = ""
                     replenish_info = None
                     if config.auto_replenish and ready_count < config.replenish_threshold:
@@ -822,9 +868,15 @@ class AutoPatrolManager:
                         asyncio.create_task(self._trigger_replenish(service_id))
 
                     # 记录到持久化历史
-                    cleared_count = (len(names_401) if config.action_401 == 'delete' else 0) + \
-                                    (len(names_quota) if config.action_quota == 'delete' else 0) + \
-                                    len(names_errors)
+                    cleared_count = (
+
+                        (len(names_401) if config.action_401 == 'delete' else 0)
+
+                        + (len(names_quota) if config.action_quota == 'delete' else 0)
+
+                    )
+
+
                     
                     history = self._history_by_service.setdefault(service_id, [])
                     history.insert(0, {
@@ -841,7 +893,7 @@ class AutoPatrolManager:
                     if len(history) > 50: history.pop()
                     self._save() # 每次成功巡检后保存历史
 
-                    final_msg = f"[{self._get_service_name(service_id)}] 自动检测扫描结束 | 有效: {ready_count}, 401: {len(names_401)}, 额度耗尽: {len(names_quota)}, 异常: {len(names_errors)} 已清理 {cleared_count} 个账号{replenish_log}"
+                    final_msg = f"[{self._get_service_name(service_id)}] 自动检测扫描结束 | 有效: {ready_count}, 401: {len(names_401)}, 额度耗尽: {len(names_quota)}, 异常: {len(names_errors)} | 自动清理仅作用于显式配置的401/额度耗尽账号，本轮已清理 {cleared_count} 个{replenish_log}"
                     logger.info(final_msg)
 
                 self._status_map[service_id] = "idle"
@@ -966,11 +1018,24 @@ async def list_accounts(service_id: int, target_type: str = "codex"):
 
     base_mgmt_url = _normalize_mgmt_url(service.api_url)
     api_token = service.api_token
+    proxy_url = _get_outbound_proxy()
     
     try:
+
         import requests as sync_requests
+
+        import urllib3
+
         url = f"{base_mgmt_url}/auth-files"
-        resp = sync_requests.get(url, headers=_get_mgmt_headers(api_token), timeout=15)
+
+        proxies = {"http": proxy_url, "https": proxy_url} if proxy_url else None
+
+        if proxy_url:
+
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+        resp = sync_requests.get(url, headers=_get_mgmt_headers(api_token), timeout=15, proxies=proxies, verify=False if proxy_url else True)
+
         if resp.status_code != 200:
             raise HTTPException(status_code=resp.status_code, detail="无法获取账号列表")
         

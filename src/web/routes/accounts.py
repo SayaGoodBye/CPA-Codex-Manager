@@ -767,7 +767,8 @@ class BatchCPAUploadRequest(BaseModel):
 async def batch_upload_accounts_to_cpa(request: BatchCPAUploadRequest):
     """批量上传账号到 CPA"""
 
-    proxy = request.proxy if request.proxy else get_settings().proxy_url
+    proxy = _get_proxy(request.proxy)
+
 
     # 解析指定的 CPA 服务
     cpa_api_url = None
@@ -794,7 +795,8 @@ async def batch_upload_accounts_to_cpa(request: BatchCPAUploadRequest):
 async def upload_account_to_cpa(account_id: int, request: Optional[CPAUploadRequest] = Body(default=None)):
     """上传单个账号到 CPA"""
 
-    proxy = request.proxy if request and request.proxy else get_settings().proxy_url
+    proxy = _get_proxy(request.proxy if request else None)
+
     cpa_service_id = request.cpa_service_id if request else None
 
     # 解析指定的 CPA 服务
@@ -1097,4 +1099,4 @@ async def get_account_inbox_code(account_id: int):
         if not code:
             return {"success": False, "error": "未收到验证码邮件"}
 
-        return {"success": True, "code": code, "email": account.email}
+        return {"success": True, "code": code, "email": account.email}

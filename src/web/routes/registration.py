@@ -87,7 +87,7 @@ class RegistrationTaskCreate(BaseModel):
     proxy: Optional[str] = None
     email_service_config: Optional[dict] = None
     email_service_id: Optional[int] = None
-    auto_upload_cpa: bool = False
+    auto_upload_cpa: bool = True
     cpa_service_ids: List[int] = []  # 指定 CPA 服务 ID 列表，空则取第一个启用的
     auto_upload_sub2api: bool = False
     sub2api_service_ids: List[int] = []  # 指定 Sub2API 服务 ID 列表
@@ -97,16 +97,16 @@ class RegistrationTaskCreate(BaseModel):
 
 class BatchRegistrationRequest(BaseModel):
     """批量注册请求"""
-    count: int = 1
+    count: int = 50
     email_service_type: str = "tempmail"
     proxy: Optional[str] = None
     email_service_config: Optional[dict] = None
     email_service_id: Optional[int] = None
     interval_min: int = 5
     interval_max: int = 30
-    concurrency: int = 1
-    mode: str = "pipeline"
-    auto_upload_cpa: bool = False
+    concurrency: int = 3
+    mode: str = "parallel"
+    auto_upload_cpa: bool = True
     cpa_service_ids: List[int] = []
     auto_upload_sub2api: bool = False
     sub2api_service_ids: List[int] = []
@@ -530,7 +530,7 @@ def _run_post_registration_uploads(
                             if not _svc:
                                 continue
                             log_callback(f"[CPA] 正在把账号打包发往服务站: {_svc.name}")
-                            _ok, _msg = upload_to_cpa(token_data, api_url=_svc.api_url, api_token=_svc.api_token)
+                            _ok, _msg = upload_to_cpa(token_data, proxy=proxy, api_url=_svc.api_url, api_token=_svc.api_token)
                             if _ok:
                                 saved_account.cpa_uploaded = True
                                 saved_account.cpa_uploaded_at = datetime.utcnow()

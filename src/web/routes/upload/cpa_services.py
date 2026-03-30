@@ -8,6 +8,7 @@ from pydantic import BaseModel
 
 from ....database import crud
 from ....database.session import get_db
+from ....core.dynamic_proxy import get_proxy_url_for_task
 from ....core.upload.cpa_upload import test_cpa_connection
 
 router = APIRouter()
@@ -158,7 +159,9 @@ async def test_cpa_service(service_id: int):
         service = crud.get_cpa_service_by_id(db, service_id)
         if not service:
             raise HTTPException(status_code=404, detail="CPA 服务不存在")
-        success, message = test_cpa_connection(service.api_url, service.api_token)
+        proxy = crud.get_random_proxy(db)
+        proxy_url = proxy.proxy_url if proxy else get_proxy_url_for_task()
+        success, message = test_cpa_connection(service.api_url, service.api_token, proxy=proxy_url)
         return {"success": success, "message": message}
 
 
@@ -166,6 +169,16 @@ async def test_cpa_service(service_id: int):
 async def test_cpa_connection_direct(request: CpaServiceTestRequest):
     """直接测试 CPA 连接（用于添加前验证）"""
     if not request.api_url or not request.api_token:
+
         raise HTTPException(status_code=400, detail="api_url 和 api_token 不能为空")
-    success, message = test_cpa_connection(request.api_url, request.api_token)
+
+    with get_db() as db:
+
+        proxy = crud.get_random_proxy(db)
+
+        proxy_url = proxy.proxy_url if proxy else get_proxy_url_for_task()
+
+    success, message = test_cpa_connection(request.api_url, request.api_token, proxy=proxy_url)
+
     return {"success": success, "message": message}
+

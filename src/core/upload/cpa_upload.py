@@ -58,7 +58,7 @@ def _extract_cpa_error(response) -> str:
     return error_msg
 
 
-def _post_cpa_auth_file_multipart(upload_url: str, filename: str, file_content: bytes, api_token: str):
+def _post_cpa_auth_file_multipart(upload_url: str, filename: str, file_content: bytes, api_token: str, proxy: Optional[str] = None):
     mime = CurlMime()
     mime.addpart(
         name="file",
@@ -71,22 +71,32 @@ def _post_cpa_auth_file_multipart(upload_url: str, filename: str, file_content: 
         upload_url,
         multipart=mime,
         headers=_build_cpa_headers(api_token),
-        proxies=None,
+        proxies={"http": proxy, "https": proxy} if proxy else None,
         timeout=30,
         impersonate="chrome110",
     )
 
 
-def _post_cpa_auth_file_raw_json(upload_url: str, filename: str, file_content: bytes, api_token: str):
+def _post_cpa_auth_file_raw_json(upload_url: str, filename: str, file_content: bytes, api_token: str, proxy: Optional[str] = None):
+
     raw_upload_url = f"{upload_url}?name={quote(filename)}"
+
     return cffi_requests.post(
+
         raw_upload_url,
+
         data=file_content,
+
         headers=_build_cpa_headers(api_token, content_type="application/json"),
-        proxies=None,
+
+        proxies={"http": proxy, "https": proxy} if proxy else None,
+
         timeout=30,
+
         impersonate="chrome110",
+
     )
+
 
 
 def generate_token_json(account: Account) -> dict:
@@ -118,11 +128,11 @@ def upload_to_cpa(
     api_token: str = None,
 ) -> Tuple[bool, str]:
     """
-    上传单个账号到 CPA 管理平台（不走代理）
+    上传单个账号到 CPA 管理平台
 
     Args:
         token_data: Token JSON 数据
-        proxy: 保留参数，不使用（CPA 上传始终直连）
+        proxy: 可选代理 URL
         api_url: 指定 CPA API URL（优先于全局配置）
         api_token: 指定 CPA API Token（优先于全局配置）
 
@@ -156,6 +166,7 @@ def upload_to_cpa(
             filename,
             file_content,
             effective_token,
+            proxy,
         )
 
         if response.status_code in (200, 201):
@@ -164,11 +175,19 @@ def upload_to_cpa(
         if response.status_code in (404, 405, 415):
             logger.warning("CPA multipart 上传失败，尝试原始 JSON 回退: %s", response.status_code)
             fallback_response = _post_cpa_auth_file_raw_json(
+
                 upload_url,
+
                 filename,
+
                 file_content,
+
                 effective_token,
+
+                proxy,
+
             )
+
             if fallback_response.status_code in (200, 201):
                 return True, "上传成功"
             response = fallback_response
@@ -263,12 +282,12 @@ def batch_upload_to_cpa(
 
 def test_cpa_connection(api_url: str, api_token: str, proxy: str = None) -> Tuple[bool, str]:
     """
-    测试 CPA 连接（不走代理）
+    测试 CPA 连接
 
     Args:
         api_url: CPA API URL
         api_token: CPA API Token
-        proxy: 保留参数，不使用（CPA 始终直连）
+        proxy: 可选代理 URL
 
     Returns:
         (成功标志, 消息)
@@ -284,12 +303,19 @@ def test_cpa_connection(api_url: str, api_token: str, proxy: str = None) -> Tupl
 
     try:
         response = cffi_requests.get(
+
             test_url,
+
             headers=headers,
-            proxies=None,
+
+            proxies={"http": proxy, "https": proxy} if proxy else None,
+
             timeout=10,
+
             impersonate="chrome110",
+
         )
+
 
         if response.status_code == 200:
             return True, "CPA 连接测试成功"
@@ -308,5 +334,5 @@ def test_cpa_connection(api_url: str, api_token: str, proxy: str = None) -> Tupl
         return False, f"无法连接到服务器: {str(e)}"
     except cffi_requests.exceptions.Timeout:
         return False, "连接超时，请检查网络配置"
-    except Exception as e:
-        return False, f"连接测试失败: {str(e)}"
+    except Exception as e:
+        return False, f"连接测试失败: {str(e)}"

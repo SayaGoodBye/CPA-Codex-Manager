@@ -10,7 +10,7 @@ let currentBatchMode = 'registration';
 let logPollingInterval = null;
 let batchPollingInterval = null;
 let accountsPollingInterval = null;
-let isBatchMode = false;
+let isBatchMode = true;
 let taskCompleted = false;  // 标记任务是否已完成
 let batchCompleted = false;  // 标记批量任务是否已完成
 let taskFinalStatus = null;  // 保存任务的最终状态
@@ -616,11 +616,11 @@ async function handleBatchRegistration(requestData) {
     displayedLogs.clear();  // 清空日志去重集合
     toastShown = false;  // 重置 toast 标志
 
-    const count = parseInt(elements.batchCount.value) || 5;
+    const count = parseInt(elements.batchCount.value) || 50;
     const intervalMin = parseInt(elements.intervalMin.value) || 5;
     const intervalMax = parseInt(elements.intervalMax.value) || 30;
     const concurrency = parseInt(elements.concurrencyCount.value) || 3;
-    const mode = elements.concurrencyMode.value || 'pipeline';
+    const mode = elements.concurrencyMode.value || 'parallel';
 
     requestData.count = count;
     requestData.interval_min = intervalMin;
