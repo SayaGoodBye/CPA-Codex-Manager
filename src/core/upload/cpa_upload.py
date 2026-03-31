@@ -432,8 +432,6 @@ def test_cpa_connection(api_url: str, api_token: str, proxy: str = None) -> Tupl
         return False, f"无法连接到服务器: {str(e)}"
     except cffi_requests.exceptions.Timeout:
         return False, "连接超时，请检查网络配置"
-    except Exception as e:
-
-        return False, f"连接测试失败: {str(e)}"
-
- 28f1c18 (修复Codex 凭证缺少 ChatGPT 账号 ID问题)
+    except Exception as e:
+
+        return False, f"连接测试失败: {str(e)}"
