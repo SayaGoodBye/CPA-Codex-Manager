@@ -106,7 +106,8 @@ class BatchRegistrationRequest(BaseModel):
     interval_max: int = 30
     concurrency: int = 3
     mode: str = "parallel"
-    auto_upload_cpa: bool = True
+    auto_upload_cpa: bool = True
+
     cpa_service_ids: List[int] = []
     auto_upload_sub2api: bool = False
     sub2api_service_ids: List[int] = []
@@ -317,11 +318,19 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
                     threading.Thread(
                         target=_run_post_registration_uploads,
                         args=(
+
                             task_uuid,
+
                             result.email,
+
+                            actual_proxy_url,
+
                             log_prefix,
+
                             batch_id,
+
                             auto_upload_cpa,
+
                             cpa_service_ids or [],
                             auto_upload_sub2api,
                             sub2api_service_ids or [],
@@ -331,12 +340,13 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
                         daemon=True,
                     ).start()
                 elif has_post_uploads:
-                    _run_post_registration_uploads(
-                        task_uuid=task_uuid,
-                        email=result.email,
-                        log_prefix=log_prefix,
-                        batch_id=batch_id,
-                        auto_upload_cpa=auto_upload_cpa,
+                    _run_post_registration_uploads(
+                        task_uuid=task_uuid,
+                        email=result.email,
+                        proxy=actual_proxy_url,
+                        log_prefix=log_prefix,
+                        batch_id=batch_id,
+                        auto_upload_cpa=auto_upload_cpa,
                         cpa_service_ids=cpa_service_ids or [],
                         auto_upload_sub2api=auto_upload_sub2api,
                         sub2api_service_ids=sub2api_service_ids or [],
@@ -493,11 +503,19 @@ def _collect_batch_totals_from_db(task_uuids: List[str]) -> Dict[str, int]:
 
 
 def _run_post_registration_uploads(
+
     task_uuid: str,
+
     email: str,
+
+    proxy: Optional[str] = None,
+
     log_prefix: str = "",
+
     batch_id: str = "",
+
     auto_upload_cpa: bool = False,
+
     cpa_service_ids: Optional[List[int]] = None,
     auto_upload_sub2api: bool = False,
     sub2api_service_ids: Optional[List[int]] = None,

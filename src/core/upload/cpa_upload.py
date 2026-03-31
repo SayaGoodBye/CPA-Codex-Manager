@@ -4,8 +4,11 @@ CPA (Codex Protocol API) 上传功能
 
 import json
 import logging
+import base64
+import hashlib
 from typing import List, Dict, Any, Tuple, Optional
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
 from urllib.parse import quote
 
 from curl_cffi import requests as cffi_requests
@@ -19,66 +22,129 @@ logger = logging.getLogger(__name__)
 
 
 def _b64url_json(data: dict) -> str:
-    import base64
-    raw = json.dumps(data, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+    raw = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
 
 
 def _b64url_bytes(data: bytes) -> str:
-    import base64
-    return base64.urlsafe_b64encode(data).rstrip(b"=").decode("ascii")
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
 
 
 def _decode_jwt_payload(token: str) -> dict:
-    import base64
-    parts = str(token or "").split(".")
-    if len(parts) < 2:
-        return {}
     try:
-        padded = parts[1] + "=" * (-len(parts[1]) % 4)
-        return json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+        parts = (token or "").split(".")
+        if len(parts) < 2:
+            return {}
+        payload = parts[1]
+        padding = 4 - len(payload) % 4
+        if padding != 4:
+            payload += "=" * padding
+        decoded = base64.urlsafe_b64decode(payload)
+        return json.loads(decoded)
     except Exception:
         return {}
 
 
+
 def _get_auth_info(payload: dict) -> dict:
-    auth = payload.get("https://auth.openai.com") or {}
-    return auth if isinstance(auth, dict) else {}
+    nested = payload.get("https://api.openai.com/auth", {})
+    if isinstance(nested, dict) and nested:
+        return nested
+
+    flat = {}
+    for key, value in (payload or {}).items():
+        if key.startswith("https://api.openai.com/auth."):
+            flat[key.split(".", 4)[-1]] = value
+    return flat
+
 
 
 def _derive_display_name(email: str) -> str:
-    if not email:
-        return "Codex User"
-    local = email.split("@", 1)[0].replace(".", " ").replace("_", " ").replace("-", " ").strip()
-    return local[:64] or "Codex User"
+    local = (email or "").split("@", 1)[0].replace(".", " ").replace("_", " ").replace("-", " ")
+    parts = [part for part in local.split() if part]
+    if not parts:
+        return "OpenAI User"
+    return " ".join(part[:1].upper() + part[1:] for part in parts[:3])
 
 
-def _build_compat_id_token(access_token: str, email: str) -> str:
-    import hashlib
+
+def _build_compat_id_token(*, access_token: str, email: str) -> str:
     payload = _decode_jwt_payload(access_token)
+    if not payload:
+        return ""
+
     auth_info = _get_auth_info(payload)
-    auth_time = payload.get("iat") or payload.get("auth_time") or 0
-    user_id = str(auth_info.get("user_id") or payload.get("sub") or hashlib.sha256((email or access_token).encode('utf-8')).hexdigest()[:32])
-    session_id = str(auth_info.get("session_id") or hashlib.sha256((access_token or email).encode('utf-8')).hexdigest()[:32])
+    email_from_token = ((payload.get("https://api.openai.com/profile") or {}).get("email") or payload.get("email") or email or "").strip()
+    email_verified = bool(
+        ((payload.get("https://api.openai.com/profile") or {}).get("email_verified"))
+        if isinstance(payload.get("https://api.openai.com/profile"), dict)
+        else payload.get("email_verified", True)
+    )
+    account_id = str(auth_info.get("chatgpt_account_id") or auth_info.get("account_id") or "").strip()
+    user_id = str(
+        auth_info.get("chatgpt_user_id")
+        or auth_info.get("user_id")
+        or payload.get("sub")
+        or ""
+    ).strip()
+    iat = int(payload.get("iat") or 0)
+    exp = int(payload.get("exp") or 0)
+    auth_time = int(payload.get("pwd_auth_time") or payload.get("auth_time") or iat or 0)
+    session_id = str(payload.get("session_id") or f"compat_session_{(account_id or user_id or 'unknown').replace('-', '')[:24]}").strip()
+    plan_type = str(auth_info.get("chatgpt_plan_type") or "free").strip() or "free"
+    organization_id = str(auth_info.get("organization_id") or f"org-{hashlib.sha1((account_id or email_from_token or user_id).encode('utf-8')).hexdigest()[:24]}")
+    project_id = str(auth_info.get("project_id") or f"proj_{hashlib.sha1((organization_id + ':' + (account_id or user_id)).encode('utf-8')).hexdigest()[:24]}")
+
+    compat_auth = {
+        "chatgpt_account_id": account_id,
+        "chatgpt_plan_type": plan_type,
+        "chatgpt_user_id": user_id,
+        "organization_id": organization_id,
+        "organizations": auth_info.get("organizations") or [
+            {
+                "id": organization_id,
+                "is_default": True,
+                "role": "owner",
+                "title": "Personal",
+            }
+        ],
+        "project_id": project_id,
+        "user_id": str(auth_info.get("user_id") or user_id or "").strip(),
+        "completed_platform_onboarding": bool(auth_info.get("completed_platform_onboarding", False)),
+        "groups": auth_info.get("groups", []),
+        "is_org_owner": bool(auth_info.get("is_org_owner", True)),
+        "localhost": bool(auth_info.get("localhost", True)),
+    }
+
     compat_payload = {
-        "iss": "https://auth.openai.com",
-        "aud": "openai-compat",
-        "email": email or payload.get("email") or "",
-        "email_verified": True,
-        "iat": auth_time,
-        "exp": payload.get("exp") or (auth_time + 3600 if auth_time else 0),
-        "user_id": user_id,
-        "name": _derive_display_name(email),
+        "amr": ["pwd", "otp", "mfa", "urn:openai:amr:otp_email"],
+        "at_hash": hashlib.sha256(access_token.encode("utf-8")).hexdigest()[:22],
+        "aud": ["app_EMoamEEZ73f0CkXaXp7hrann"],
+        "auth_provider": "password",
+        "auth_time": auth_time,
+        "email": email_from_token,
+        "email_verified": email_verified,
+        "exp": exp,
+        "https://api.openai.com/auth": compat_auth,
+        "iat": iat,
+        "iss": payload.get("iss") or "https://auth.openai.com",
+        "jti": f"compat-{hashlib.sha1(access_token.encode('utf-8')).hexdigest()[:32]}",
+        "name": _derive_display_name(email_from_token),
         "rat": auth_time,
         "sid": session_id,
         "sub": payload.get("sub") or user_id,
     }
+
     header = {"alg": "RS256", "typ": "JWT", "kid": "compat"}
     signature = _b64url_bytes(b"compat_signature_for_cpa_parsing_only")
     return f"{_b64url_json(header)}.{_b64url_json(compat_payload)}.{signature}"
 
 
+
 def _resolve_chatgpt_account_id(account: Account) -> str:
+    """尽量从账号主字段和额外元数据中恢复 ChatGPT 账号 ID。"""
     direct_value = str(account.account_id or "").strip() or str(account.workspace_id or "").strip()
     if direct_value:
         return direct_value
@@ -104,9 +170,8 @@ def _resolve_chatgpt_account_id(account: Account) -> str:
     access_candidates = [
         auth_info.get("chatgpt_account_id"),
         auth_info.get("account_id"),
+        auth_info.get("chatgpt_user_id"),
         auth_info.get("user_id"),
-        access_payload.get("chatgpt_account_id"),
-        access_payload.get("account_id"),
         access_payload.get("sub"),
     ]
     for item in access_candidates:
@@ -114,6 +179,7 @@ def _resolve_chatgpt_account_id(account: Account) -> str:
         if value:
             return value
     return ""
+
 
 
 def _normalize_cpa_auth_files_url(api_url: str) -> str:
@@ -207,16 +273,30 @@ def generate_token_json(account: Account) -> dict:
     Returns:
         CPA 格式的 Token 字典
     """
+    resolved_account_id = _resolve_chatgpt_account_id(account)
+    effective_id_token = account.id_token or ""
+    if account.access_token and not effective_id_token:
+        effective_id_token = _build_compat_id_token(access_token=account.access_token, email=account.email)
+
+    expired_str = account.expires_at.strftime("%Y-%m-%dT%H:%M:%S+08:00") if account.expires_at else ""
+    if account.access_token and not expired_str:
+        payload = _decode_jwt_payload(account.access_token)
+        exp_timestamp = payload.get("exp")
+        if isinstance(exp_timestamp, int) and exp_timestamp > 0:
+            exp_dt = datetime.fromtimestamp(exp_timestamp, tz=timezone(timedelta(hours=8)))
+            expired_str = exp_dt.strftime("%Y-%m-%dT%H:%M:%S+08:00")
+
     return {
         "type": "codex",
         "email": account.email,
-        "expired": account.expires_at.strftime("%Y-%m-%dT%H:%M:%S+08:00") if account.expires_at else "",
-        "id_token": account.id_token or "",
-        "account_id": account.account_id or "",
+        "expired": expired_str,
+        "id_token": effective_id_token,
+        "account_id": resolved_account_id,
         "access_token": account.access_token or "",
-        "last_refresh": account.last_refresh.strftime("%Y-%m-%dT%H:%M:%S+08:00") if account.last_refresh else "",
+        "last_refresh": account.last_refresh.strftime("%Y-%m-%dT%H:%M:%S+08:00") if account.last_refresh else datetime.now(tz=timezone(timedelta(hours=8))).strftime("%Y-%m-%dT%H:%M:%S+08:00"),
         "refresh_token": account.refresh_token or "",
     }
+
 
 
 def upload_to_cpa(
@@ -432,6 +512,9 @@ def test_cpa_connection(api_url: str, api_token: str, proxy: str = None) -> Tupl
         return False, f"无法连接到服务器: {str(e)}"
     except cffi_requests.exceptions.Timeout:
         return False, "连接超时，请检查网络配置"
-    except Exception as e:
-
-        return False, f"连接测试失败: {str(e)}"
+    except Exception as e:
+
+
+
+        return False, f"连接测试失败: {str(e)}"
+
